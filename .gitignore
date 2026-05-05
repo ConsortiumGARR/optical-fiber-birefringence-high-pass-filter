@@ -30,3 +30,6 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+gnmic_plugins/*
+!gnmic_plugins/.gitkeep
