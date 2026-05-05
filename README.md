@@ -109,13 +109,26 @@ If the receiver is currently tracking a stable, low-pass-filtered polarization s
 **`rotation_angle_rad`**: This is the clockwise magnitude of the sudden rotation around the `rotation_axis`. Physically, it is the retardance induced by the transient perturbation of one eigen-polarization with respect to the other. For example, suppose the sudden rotation is around the S1-axis by $\theta$. The input field can be written as a linear combination of H and V polarizations (eigenvectors). Then, after the rotation, the phase difference of H and V components is changed by $\theta$. 
 
 Mathematically, the sudden rotation matrix $D$ around S1-axis is:
-$$ D = \begin{pmatrix} e^{i\theta/2} & 0 \\ 0 & e^{-i\theta/2} \end{pmatrix} $$
+
+$$ D = \begin{pmatrix} 
+e^{i\theta/2} & 0 \\
+0 & e^{-i\theta/2} 
+\end{pmatrix} $$
 
 Let the input electric field be an arbitrary mix of H and V:
-$$ \vec{E}_{in} = \begin{pmatrix} |E_H| e^{i\phi_H} \\ |E_V| e^{i\phi_V} \end{pmatrix} $$
+
+$$ \vec{E}_{in} = \begin{pmatrix} 
+|E_H| e^{i\phi_H} \\
+|E_V| e^{i\phi_V}
+\end{pmatrix} $$
 
 Applying the birefringence operator $D$:
-$$ \vec{E}_{out} = D \vec{E}_{in} = \begin{pmatrix} e^{i\theta/2} |E_H| e^{i\phi_H} \\ e^{-i\theta/2} |E_V| e^{i\phi_V} \end{pmatrix} = \begin{pmatrix} |E_H| e^{i(\phi_H + \theta/2)} \\ |E_V| e^{i(\phi_V - \theta/2)} \end{pmatrix} $$
+
+$$ \vec{E}_{out} = D \vec{E}_{in} = \begin{pmatrix} 
+|E_H| e^{i(\phi_H + \theta/2)} \\ 
+|E_V| e^{i(\phi_V - \theta/2)} 
+\end{pmatrix} $$
 
 The final phase difference between the H and V fields is:
+
 $$ \Delta\phi' = \phi_H' - \phi_V' = \left(\phi_H + \frac{\theta}{2}\right) - \left(\phi_V - \frac{\theta}{2}\right) = (\phi_H - \phi_V) + \theta $$
