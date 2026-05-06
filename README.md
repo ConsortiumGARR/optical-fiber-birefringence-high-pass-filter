@@ -102,20 +102,33 @@ For each incoming 2x2 Jones Matrix A(t) at time t:
 
 The `rotation_axis` and `rotation_angle_rad` quantify the **high-frequency differential perturbation** (the "fast transient") applied *on top* of the fiber's baseline birefringence. They do not represent the total birefringence of the optical link. Because this processor acts as a high-pass filter, the outputs isolate sudden mechanical or acoustic impacts (e.g., trains, vibrations, aerial cable wind-whip) while ignoring slow thermal drifts.
 
-If the receiver is currently tracking a stable, low-pass-filtered polarization state $\vec{S}_{ref}$, a transient event will cause the incoming light to suddenly whip away from this baseline into a new polarization state $\vec{S}_{last}$. The `rotation_axis` and `rotation_angle_rad` tell you around what axis and by how many radians to rotate $\vec{S}_{ref}$ on the Poincaré sphere to obtain $\vec{S}_{last}$.
+If the receiver is currently tracking a stable, low-pass-filtered polarization state $\vec{S}\_{ref}$, a transient event will cause the incoming light to suddenly whip away from this baseline into a new polarization state $\vec{S}\_{last}$. The `rotation_axis` and `rotation_angle_rad` tell you around what axis and by how many radians to rotate $\vec{S}\_{ref}$ on the Poincaré sphere to obtain $\vec{S}\_{last}$.
 
 **`rotation_axis`**: The two polarizations found by intersecting this axis with the Poincaré sphere are the eigenvectors of the *transient perturbation*. If the light arriving at the perturbation point happens to be polarized with one of these two polarizations, the transient will not induce a change in the polarization.
 
 **`rotation_angle_rad`**: This is the clockwise magnitude of the sudden rotation around the `rotation_axis`. Physically, it is the retardance induced by the transient perturbation of one eigen-polarization with respect to the other. For example, suppose the sudden rotation is around the S1-axis by $\theta$. The input field can be written as a linear combination of H and V polarizations (eigenvectors). Then, after the rotation, the phase difference of H and V components is changed by $\theta$. 
 
 Mathematically, the sudden rotation matrix $D$ around S1-axis is:
-$$ D = \begin{pmatrix} e^{i\theta/2} & 0 \\ 0 & e^{-i\theta/2} \end{pmatrix} $$
+
+$$ D = \begin{pmatrix} 
+e^{i\theta/2} & 0 \\
+0 & e^{-i\theta/2} 
+\end{pmatrix} $$
 
 Let the input electric field be an arbitrary mix of H and V:
-$$ \vec{E}_{in} = \begin{pmatrix} |E_H| e^{i\phi_H} \\ |E_V| e^{i\phi_V} \end{pmatrix} $$
+
+$$ \vec{E}_{in} = \begin{pmatrix} 
+|E_H| e^{i\phi_H} \\
+|E_V| e^{i\phi_V}
+\end{pmatrix} $$
 
 Applying the birefringence operator $D$:
-$$ \vec{E}_{out} = D \vec{E}_{in} = \begin{pmatrix} e^{i\theta/2} |E_H| e^{i\phi_H} \\ e^{-i\theta/2} |E_V| e^{i\phi_V} \end{pmatrix} = \begin{pmatrix} |E_H| e^{i(\phi_H + \theta/2)} \\ |E_V| e^{i(\phi_V - \theta/2)} \end{pmatrix} $$
+
+$$ \vec{E}_{out} = D \vec{E}_{in} = \begin{pmatrix} 
+|E_H| e^{i(\phi_H + \theta/2)} \\ 
+|E_V| e^{i(\phi_V - \theta/2)} 
+\end{pmatrix} $$
 
 The final phase difference between the H and V fields is:
+
 $$ \Delta\phi' = \phi_H' - \phi_V' = \left(\phi_H + \frac{\theta}{2}\right) - \left(\phi_V - \frac{\theta}{2}\right) = (\phi_H - \phi_V) + \theta $$
