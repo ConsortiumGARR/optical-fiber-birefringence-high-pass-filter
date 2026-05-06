@@ -102,7 +102,7 @@ For each incoming 2x2 Jones Matrix A(t) at time t:
 
 The `rotation_axis` and `rotation_angle_rad` quantify the **high-frequency differential perturbation** (the "fast transient") applied *on top* of the fiber's baseline birefringence. They do not represent the total birefringence of the optical link. Because this processor acts as a high-pass filter, the outputs isolate sudden mechanical or acoustic impacts (e.g., trains, vibrations, aerial cable wind-whip) while ignoring slow thermal drifts.
 
-If the receiver is currently tracking a stable, low-pass-filtered polarization state $\vec{S}_{ref}$, a transient event will cause the incoming light to suddenly whip away from this baseline into a new polarization state $\vec{S}_{last}$. The `rotation_axis` and `rotation_angle_rad` tell you around what axis and by how many radians to rotate $\vec{S}_{ref}$ on the Poincaré sphere to obtain $\vec{S}_{last}$.
+If the receiver is currently tracking a stable, low-pass-filtered polarization state $\vec{S}\_{ref}$, a transient event will cause the incoming light to suddenly whip away from this baseline into a new polarization state $\vec{S}\_{last}$. The `rotation_axis` and `rotation_angle_rad` tell you around what axis and by how many radians to rotate $\vec{S}\_{ref}$ on the Poincaré sphere to obtain $\vec{S}\_{last}$.
 
 **`rotation_axis`**: The two polarizations found by intersecting this axis with the Poincaré sphere are the eigenvectors of the *transient perturbation*. If the light arriving at the perturbation point happens to be polarized with one of these two polarizations, the transient will not induce a change in the polarization.
 
