@@ -40,15 +40,23 @@ func toFloat64(v interface{}) (float64, bool) {
 	}
 }
 
-type subcarrierBuffer struct {
-	values    map[string]float64
-	timestamp int64
-	tags      map[string]string
-	name      string
-	lastTouch int64
+// Parses stringified or numeric timestamps to int64
+func parseTimestamp(v interface{}) (int64, bool) {
+	switch i := v.(type) {
+	case string:
+		ts, err := strconv.ParseInt(i, 10, 64)
+		return ts, err == nil
+	case float64:
+		return int64(i), true
+	case int64:
+		return i, true
+	case int:
+		return int64(i), true
+	default:
+		return 0, false
+	}
 }
 
-// refState holds the reference matrix and the exact timestamp of the last update
 type refState struct {
 	matrix [4]complex128
 	lastTs int64
@@ -59,7 +67,6 @@ type birefTrackerProcessor struct {
 	CutoffHz  float64 `mapstructure:"cutoff-hz"`
 
 	mu          sync.Mutex
-	bufferCache map[string]*subcarrierBuffer
 	refCache    map[string]*refState
 	lastCleanup int64
 
@@ -79,7 +86,6 @@ func (p *birefTrackerProcessor) Init(cfg interface{}, opts ...formatters.Option)
 		return fmt.Errorf("cutoff-hz (%f) must be less than Nyquist (%f) of the nominal tap rate", p.CutoffHz, p.TapRateHz/2.0)
 	}
 
-	p.bufferCache = make(map[string]*subcarrierBuffer)
 	p.refCache = make(map[string]*refState)
 	p.lastCleanup = time.Now().Unix()
 
@@ -89,7 +95,8 @@ func (p *birefTrackerProcessor) Init(cfg interface{}, opts ...formatters.Option)
 	return nil
 }
 
-// shatter natively explodes the samples arrays into distinct, chronologically spaced events.
+// shatter explodes Samples.XX arrays into distinct events using exact hardware timestamps.
+// It discards any subcarrier data that is NOT data.0.
 func (p *birefTrackerProcessor) shatter(events []*formatters.EventMsg) []*formatters.EventMsg {
 	var res []*formatters.EventMsg
 
@@ -98,80 +105,62 @@ func (p *birefTrackerProcessor) shatter(events []*formatters.EventMsg) []*format
 			continue
 		}
 
-		maxSampleID := -1
-		hasSOP := false
-
-		// Pass 1: Find max sample_id to infer temporal spacing
-		for k := range ev.Values {
+		// Pass 1: Extract exact hardware timestamps for each Sample
+		timestamps := make(map[int]int64)
+		for k, v := range ev.Values {
 			if idx := strings.Index(k, "Samples."); idx != -1 {
 				rest := k[idx+8:]
-				slashIdx := strings.IndexByte(rest, '/')
-				if slashIdx != -1 {
-					idStr := rest[:slashIdx]
-					if id, err := strconv.Atoi(idStr); err == nil {
-						if id > maxSampleID {
-							maxSampleID = id
+				parts := strings.Split(rest, "/")
+				if len(parts) == 2 && parts[1] == "timestamp" {
+					if sampleID, err := strconv.Atoi(parts[0]); err == nil {
+						if ts, ok := parseTimestamp(v); ok {
+							timestamps[sampleID] = ts
 						}
-						hasSOP = true
 					}
 				}
 			}
 		}
 
-		// Fast-path: bypass events with no sample arrays
-		if !hasSOP {
-			res = append(res, ev)
-			continue
-		}
-
-		numSamples := int64(maxSampleID + 1)
-		nsIncrement := int64(1e9) / numSamples
-
-		type groupKey struct {
-			sampleID int
-			dataID   string
-		}
-		groups := make(map[groupKey]map[string]interface{})
+		// Pass 2: Group metrics by sample, applying dimensionality reduction
+		groups := make(map[int]map[string]interface{})
 		nonSopValues := make(map[string]interface{})
+		hasSOP := false
 
-		// Pass 2: Shatter and re-map
 		for k, v := range ev.Values {
 			idx := strings.Index(k, "Samples.")
 			if idx == -1 {
-				nonSopValues[k] = v
+				nonSopValues[k] = v // Non-SOP meta data passes through unharmed
 				continue
 			}
 
 			rest := k[idx+8:]
 			parts := strings.Split(rest, "/")
-			if len(parts) < 3 {
-				nonSopValues[k] = v // fallback
-				continue
-			}
-
 			sampleID, err := strconv.Atoi(parts[0])
 			if err != nil {
-				nonSopValues[k] = v
 				continue
 			}
 
-			dataIDParts := strings.Split(parts[1], ".")
-			dataID := "0"
-			if len(dataIDParts) > 1 {
-				dataID = dataIDParts[1]
-			}
+			hasSOP = true
 
-			metricName := strings.Join(parts[2:], "/")
+			// We only process data payload arrays
+			if len(parts) >= 3 && strings.HasPrefix(parts[1], "data.") {
+				dataID := strings.TrimPrefix(parts[1], "data.")
 
-			gk := groupKey{sampleID, dataID}
-			if groups[gk] == nil {
-				groups[gk] = make(map[string]interface{})
+				// DIMENSIONALITY REDUCTION: Keep only subcarrier 0. Drop the rest.
+				if dataID != "0" {
+					continue
+				}
+
+				metricName := strings.Join(parts[2:], "/")
+				if groups[sampleID] == nil {
+					groups[sampleID] = make(map[string]interface{})
+				}
+				// Append raw Stokes, Jones, and rate vectors verbatim
+				groups[sampleID][metricName] = v
 			}
-			groups[gk][metricName] = v
 		}
 
-		// Keep non-SOP values at base timestamp
-		if len(nonSopValues) > 0 {
+		if len(nonSopValues) > 0 || !hasSOP {
 			res = append(res, &formatters.EventMsg{
 				Name:      ev.Name,
 				Timestamp: ev.Timestamp,
@@ -180,23 +169,29 @@ func (p *birefTrackerProcessor) shatter(events []*formatters.EventMsg) []*format
 			})
 		}
 
-		// Distribute shattered metrics over the timeline
-		for gk, vals := range groups {
+		// Distribute shattered metrics bound to their exact hardware temporal origin
+		for sampleID, vals := range groups {
+			ts, ok := timestamps[sampleID]
+			if !ok {
+				ts = ev.Timestamp // Fallback safety net
+			}
+
 			newTags := copyTags(ev.Tags)
 			if newTags == nil {
 				newTags = make(map[string]string)
 			}
-			newTags["data_id"] = gk.dataID
+			newTags["data_id"] = "0"
 
 			res = append(res, &formatters.EventMsg{
 				Name:      ev.Name,
-				Timestamp: ev.Timestamp + (int64(gk.sampleID) * nsIncrement),
+				Timestamp: ts,
 				Tags:      newTags,
-				Values:    vals,
+				Values:    vals, // Carries ALL context including stokes & rates
 			})
 		}
 	}
 
+	// Ensure chronological stability within the batch
 	sort.SliceStable(res, func(i, j int) bool {
 		return res[i].Timestamp < res[j].Timestamp
 	})
@@ -205,25 +200,22 @@ func (p *birefTrackerProcessor) shatter(events []*formatters.EventMsg) []*format
 }
 
 func (p *birefTrackerProcessor) Apply(events ...*formatters.EventMsg) []*formatters.EventMsg {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	nowSec := time.Now().Unix()
 
-	// Garbage collection for stale fragments
+	// 1. FAST LOCK: GC stale state matrices periodically
+	p.mu.Lock()
 	if nowSec-p.lastCleanup > 60 {
-		for k, v := range p.bufferCache {
-			if nowSec-v.lastTouch > 60 {
-				delete(p.bufferCache, k)
+		for k, v := range p.refCache {
+			if nowSec-(v.lastTs/1e9) > 60 { // lastTs is in nanoseconds
 				delete(p.refCache, k)
 			}
 		}
 		p.lastCleanup = nowSec
 	}
+	p.mu.Unlock()
 
-	// Explode samples inline (replaces Starlark)
+	// 2. PARALLELIZABLE: Shatter the JSON arrays statelessly
 	shattered := p.shatter(events)
-
 	var outEvents []*formatters.EventMsg
 
 	reqKeys := []string{
@@ -234,122 +226,63 @@ func (p *birefTrackerProcessor) Apply(events ...*formatters.EventMsg) []*formatt
 	}
 
 	for _, ev := range shattered {
-		if ev == nil || ev.Values == nil {
+		if ev == nil || len(ev.Values) == 0 {
 			continue
 		}
 
-		jonesValues := make(map[string]float64)
-		otherValues := make(map[string]interface{})
-
-		for k, v := range ev.Values {
-			isReq := false
-			for _, rk := range reqKeys {
-				if k == rk {
-					isReq = true
-					break
-				}
-			}
-			if isReq {
-				if fv, ok := toFloat64(v); ok {
-					jonesValues[k] = fv
-				}
-			} else {
-				otherValues[k] = v
-			}
-		}
-
-		if len(otherValues) > 0 {
-			evOther := &formatters.EventMsg{
-				Name:      ev.Name,
-				Timestamp: ev.Timestamp,
-				Tags:      copyTags(ev.Tags),
-				Values:    otherValues,
-			}
-			outEvents = append(outEvents, evOther)
-		}
-
-		if len(jonesValues) == 0 {
-			continue
-		}
-
-		if ev.Tags == nil {
-			continue
-		}
-		source := ev.Tags["source"]
-		comp := ev.Tags["component_name"]
-		dataID := ev.Tags["data_id"]
-
-		if source == "" || comp == "" || dataID == "" {
-			continue
-		}
-
-		key := fmt.Sprintf("%s|%s|%s", source, comp, dataID)
-
-		b, exists := p.bufferCache[key]
-		if !exists {
-			b = &subcarrierBuffer{
-				values: make(map[string]float64),
-				tags:   copyTags(ev.Tags),
-			}
-			p.bufferCache[key] = b
-		}
-
-		b.timestamp = ev.Timestamp
-		b.name = ev.Name
-		b.lastTouch = nowSec
-		for k, v := range jonesValues {
-			b.values[k] = v
-		}
-
+		// Due to JSON_IETF atomicity, checking the map guarantees sample completeness.
 		ready := true
 		for _, rk := range reqKeys {
-			if _, ok := b.values[rk]; !ok {
+			if _, ok := ev.Values[rk]; !ok {
 				ready = false
 				break
 			}
 		}
 
-		if ready {
-			A00 := complex(b.values["jones-matrix/xx/real"], b.values["jones-matrix/xx/imaginary"])
-			A01 := complex(b.values["jones-matrix/xy/real"], b.values["jones-matrix/xy/imaginary"])
-			A10 := complex(b.values["jones-matrix/yx/real"], b.values["jones-matrix/yx/imaginary"])
-			A11 := complex(b.values["jones-matrix/yy/real"], b.values["jones-matrix/yy/imaginary"])
-
-			angle, v0, v1, v2, ok := p.processJones(key, A00, A01, A10, A11, b.timestamp)
-			if ok {
-				outEv := &formatters.EventMsg{
-					Name:      b.name,
-					Timestamp: b.timestamp,
-					Tags:      copyTags(b.tags),
-					Values: map[string]interface{}{
-						"polarization/rotation_axis/S3_sigma_x":       v0,
-						"polarization/rotation_axis/S2_sigma_y":       v1,
-						"polarization/rotation_axis/S1_sigma_z":       v2,
-						"polarization/rotation_angle_rad":   angle,
-						"jones-matrix/xx/real":                        b.values["jones-matrix/xx/real"],
-						"jones-matrix/xx/imaginary":                   b.values["jones-matrix/xx/imaginary"],
-						"jones-matrix/xy/real":                        b.values["jones-matrix/xy/real"],
-						"jones-matrix/xy/imaginary":                   b.values["jones-matrix/xy/imaginary"],
-						"jones-matrix/yx/real":                        b.values["jones-matrix/yx/real"],
-						"jones-matrix/yx/imaginary":                   b.values["jones-matrix/yx/imaginary"],
-						"jones-matrix/yy/real":                        b.values["jones-matrix/yy/real"],
-						"jones-matrix/yy/imaginary":                   b.values["jones-matrix/yy/imaginary"],
-					},
-				}
-				outEvents = append(outEvents, outEv)
-			}
-
-			// Clear matrix to prepare for next sample fragment
-			for _, rk := range reqKeys {
-				delete(b.values, rk)
-			}
+		if !ready {
+			outEvents = append(outEvents, ev)
+			continue
 		}
+
+		vXXr, _ := toFloat64(ev.Values["jones-matrix/xx/real"])
+		vXXi, _ := toFloat64(ev.Values["jones-matrix/xx/imaginary"])
+		vXYr, _ := toFloat64(ev.Values["jones-matrix/xy/real"])
+		vXYi, _ := toFloat64(ev.Values["jones-matrix/xy/imaginary"])
+		vYXr, _ := toFloat64(ev.Values["jones-matrix/yx/real"])
+		vYXi, _ := toFloat64(ev.Values["jones-matrix/yx/imaginary"])
+		vYYr, _ := toFloat64(ev.Values["jones-matrix/yy/real"])
+		vYYi, _ := toFloat64(ev.Values["jones-matrix/yy/imaginary"])
+
+		A00 := complex(vXXr, vXXi)
+		A01 := complex(vXYr, vXYi)
+		A10 := complex(vYXr, vYXi)
+		A11 := complex(vYYr, vYYi)
+
+		source := ev.Tags["source"]
+		comp := ev.Tags["component_name"]
+		key := fmt.Sprintf("%s|%s|0", source, comp)
+
+		// 3. MATH ENGINE: Lock is handled internally around cache interactions only
+		angle, v0, v1, v2, ok := p.processJones(key, A00, A01, A10, A11, ev.Timestamp)
+
+		if ok {
+			ev.Values["polarization/rotation_angle_rad"] = angle
+			ev.Values["polarization/rotation_axis/S3_sigma_x"] = v0
+			ev.Values["polarization/rotation_axis/S2_sigma_y"] = v1
+			ev.Values["polarization/rotation_axis/S1_sigma_z"] = v2
+		}
+
+		outEvents = append(outEvents, ev)
 	}
 
 	return outEvents
 }
 
 func (p *birefTrackerProcessor) processJones(key string, A00, A01, A10, A11 complex128, timestampNs int64) (float64, float64, float64, float64, bool) {
+	// =========================================================
+	// STATELESS PHASE: Parallelizes across gNMIc worker threads
+	// =========================================================
+
 	// 1. Polar Decomposition A = U*R -> extract unitary part U
 	m00 := real(A00*cmplx.Conj(A00) + A10*cmplx.Conj(A10))
 	m11 := real(A01*cmplx.Conj(A01) + A11*cmplx.Conj(A11))
@@ -384,6 +317,12 @@ func (p *birefTrackerProcessor) processJones(key string, A00, A01, A10, A11 comp
 	U10 /= sqDetU
 	U11 /= sqDetU
 
+	// =========================================================
+	// STATEFUL PHASE: Critical section for memory integrity
+	// =========================================================
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	state, exists := p.refCache[key]
 	if !exists {
 		p.refCache[key] = &refState{
@@ -395,10 +334,10 @@ func (p *birefTrackerProcessor) processJones(key string, A00, A01, A10, A11 comp
 
 	ref := state.matrix
 
-	// Calculate exact delta time in seconds (gNMI timestamps are nanoseconds)
+	// Calculate exact delta time in seconds using hardware timestamps
 	dt := float64(timestampNs-state.lastTs) / 1e9
 
-	// Guard against exact duplicates or out-of-order packets causing negative dt
+	// Guard against exact duplicates causing negative/zero dt
 	if dt <= 0 {
 		dt = 1.0 / p.TapRateHz // Fallback to nominal rate
 	}
@@ -408,7 +347,7 @@ func (p *birefTrackerProcessor) processJones(key string, A00, A01, A10, A11 comp
 	dynBeta := 1.0 - dynAlpha
 
 	// 3. SU(2) Branch-Cut Resolution (180-degree flip)
-	// Keeps relative rotation contiguous in standard bounds, preventing 2π jumps in resulting vectors.
+	// Keeps relative rotation contiguous in standard bounds, preventing 2π jumps.
 	tr := real(U00*cmplx.Conj(ref[0]) + U01*cmplx.Conj(ref[1]) +
 		U10*cmplx.Conj(ref[2]) + U11*cmplx.Conj(ref[3]))
 
@@ -425,10 +364,10 @@ func (p *birefTrackerProcessor) processJones(key string, A00, A01, A10, A11 comp
 	D10 := U10*cmplx.Conj(ref[0]) + U11*cmplx.Conj(ref[1])
 	D11 := U10*cmplx.Conj(ref[2]) + U11*cmplx.Conj(ref[3])
 
-	// 5. Pauli extraction -> rotation vector
-	v1 := imag(D01 + D10) // sigma_x
-	v2 := real(D01 - D10) // sigma_y
-	v3 := imag(D00 - D11) // sigma_z
+	// 5. Pauli extraction -> physical rotation vector extraction
+	v1 := imag(D01 + D10) // sigma_x (horizontal/vertical)
+	v2 := real(D01 - D10) // sigma_y (±45°)
+	v3 := imag(D00 - D11) // sigma_z (circular)
 
 	normV := math.Sqrt(v1*v1 + v2*v2 + v3*v3)
 	angle := 2.0 * math.Atan2(normV, real(D00+D11))
@@ -449,7 +388,7 @@ func (p *birefTrackerProcessor) processJones(key string, A00, A01, A10, A11 comp
 		n00 /= complex(mag, 0)
 		n01 /= complex(mag, 0)
 
-		// Update reference matrix preserving SU(2) structure, and log exact timestamp
+		// Update reference matrix preserving SU(2) structure, log exact hardware TS
 		state.matrix = [4]complex128{n00, n01, -cmplx.Conj(n01), cmplx.Conj(n00)}
 		state.lastTs = timestampNs
 	}
